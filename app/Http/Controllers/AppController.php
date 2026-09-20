@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Exception;
 
 class AppController extends Controller
 {
@@ -47,29 +48,45 @@ class AppController extends Controller
         return response()->json(['status' => 'success']);
     }
 
+    // FUNGSI YANG DIPERBAIKI (Tahan Bentrokan & Sangat Cepat)
     public function saveMultipleRecords(Request $request)
     {
         $tableName = $this->getTableName($request->input('table'));
         $records = $request->input('data');
 
+        if (empty($records)) {
+            return response()->json(['status' => 'success']);
+        }
+
+        $cleanRecords = [];
         foreach ($records as $data) {
             unset($data['showPassword']);
-            DB::table($tableName)->updateOrInsert(['id' => $data['id']], $data);
+            $cleanRecords[] = $data;
         }
-        return response()->json(['status' => 'success']);
+
+        // Ambil nama kolom yang akan di-update (Kecuali ID)
+        $columnsToUpdate = array_keys($cleanRecords[0]);
+        $columnsToUpdate = array_diff($columnsToUpdate, ['id']);
+
+        // Mulai Transaksi Database
+        DB::beginTransaction();
+        try {
+            // Upsert: Simpan semua data massal hanya dengan 1 Query!
+            DB::table($tableName)->upsert($cleanRecords, ['id'], $columnsToUpdate);
+            
+            DB::commit(); // Simpan permanen jika mulus
+            return response()->json(['status' => 'success']);
+        } catch (Exception $e) {
+            DB::rollBack(); // Batalkan semua jika ada tabrakan, cegah data masuk setengah-setengah
+            return response()->json(['status' => 'error', 'message' => 'Server sibuk, silakan coba lagi.'], 500);
+        }
     }
 
-    // FUNGSI BARU KHUSUS UNTUK IMPORT EXCEL
+    // FUNGSI IMPORT EXCEL YANG DIPERBAIKI
     public function saveBatchRecords(Request $request)
     {
-        $tableName = $this->getTableName($request->input('table'));
-        $records = $request->input('data');
-
-        foreach ($records as $data) {
-            unset($data['showPassword']);
-            DB::table($tableName)->updateOrInsert(['id' => $data['id']], $data);
-        }
-        return response()->json(['status' => 'success']);
+        // Menggunakan logika canggih yang sama dengan saveMultipleRecords
+        return $this->saveMultipleRecords($request);
     }
 
     public function deleteRecord(Request $request)
@@ -86,14 +103,25 @@ class AppController extends Controller
         $tableName = $this->getTableName($request->input('table'));
         $records = $request->input('data');
 
-        DB::table($tableName)->truncate();
-        
-        $cleanRecords = array_map(function($item) {
-            unset($item['showPassword']);
-            return $item;
-        }, $records);
+        DB::beginTransaction();
+        try {
+            DB::table($tableName)->truncate();
+            
+            $cleanRecords = array_map(function($item) {
+                unset($item['showPassword']);
+                return $item;
+            }, $records);
 
-        DB::table($tableName)->insert($cleanRecords);
-        return response()->json(['status' => 'success']);
+            // Jika array sangat besar, pecah per 500 baris agar RAM server aman
+            foreach (array_chunk($cleanRecords, 500) as $chunk) {
+                DB::table($tableName)->insert($chunk);
+            }
+            
+            DB::commit();
+            return response()->json(['status' => 'success']);
+        } catch (Exception $e) {
+            DB::rollBack();
+            return response()->json(['status' => 'error'], 500);
+        }
     }
 }
